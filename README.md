@@ -1,6 +1,6 @@
 # Emergency Vehicle Traffic Signal Management System 🚑
 
-An intelligent computer vision system that integrates deep learning object detection with municipal traffic signal controllers to provide automated green light preemption for emergency vehicles (ambulances, fire engines, police units) across a 4-road, 8-lane intersection.
+An AI-powered Emergency Vehicle Priority Traffic Management System that leverages real-time computer vision and deep learning to detect and classify emergency vehicles—such as ambulances, fire engines, and police vehicles—and automatically coordinate with municipal traffic signal controllers to activate green lights along their approach. Designed for a four-road, eight-lane intersection, the system aims to reduce emergency response times, minimize traffic congestion, and enable safer, faster passage for emergency services.
 
 ---
 
