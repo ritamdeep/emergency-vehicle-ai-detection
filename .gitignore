@@ -7,6 +7,7 @@ venv/
 .venv/
 env/
 .ultralytics/
+.pytest_cache/
 
 # Node & Frontend Build
 node_modules/
@@ -20,6 +21,7 @@ frontend/dist/
 !.env.example
 !frontend/.env.example
 .streamlit/secrets.toml
+backend/.streamlit/secrets.toml
 
 # Operating System & Editor Metadata
 .DS_Store
@@ -31,7 +33,7 @@ ehthumbs.db
 
 # Heavy Video Files & Generated Outputs (Keep sample testing video)
 *.mp4
-!WhatsApp Video 2026-09-13 at 18.14.01.mp4
+!samples/demo-traffic.mp4
 videos dataset/
 temp_*.mp4
 output_*.mp4
