@@ -16,13 +16,13 @@ At a busy junction, an ambulance can lose precious minutes stuck at a red light.
 
 ```mermaid
 flowchart LR
-    A[CCTV video of a lane] --> B[React dashboard]
-    B -->|upload video| C[FastAPI backend]
-    C --> D[YOLOv11 + siren-light check]
-    D -->|"when the ambulance is visible (time segments)"| B
-    B --> E[Signal controller]
-    E --> F[Green for the ambulance's road, red for the others]
-    E --> G[Ambulance gone → back to normal cycle]
+    A["CCTV video<br/>of a lane"] --> B["React<br/>dashboard"]
+    B -->|"upload video"| C["FastAPI<br/>backend"]
+    C --> D["YOLOv11 +<br/>siren check"]
+    D -->|"time segments<br/>(ambulance visible)"| B
+    B --> E["Signal<br/>controller"]
+    E --> F["Green for<br/>ambulance road<br/>(red for others)"]
+    E --> G["Ambulance gone →<br/>back to normal cycle"]
 ```
 
 1. You upload a video to one of the 8 lane cameras.
@@ -251,16 +251,16 @@ A confident box alone can still be wrong, so the project adds a second check tha
 
 ```mermaid
 flowchart TD
-    A[Video file] --> B[Pick every 3rd frame]
-    B --> C[Resize to 640 × 640]
-    C --> D[YOLOv11 finds vehicles: box + class + confidence]
-    D --> E{Is it the ambulance class?}
+    A["Video file"] --> B["Pick every<br/>3rd frame"]
+    B --> C["Resize to<br/>640 × 640"]
+    C --> D["YOLOv11 vehicle detection<br/>(box + class + confidence)"]
+    D --> E{"Ambulance<br/>class?"}
     E -- No --> B
-    E -- Yes --> F{Confidence high enough, or siren lights seen?}
+    E -- Yes --> F{"Confidence &ge; 0.20<br/>or siren lights?"}
     F -- No --> B
-    F -- Yes --> G[Record: time + confidence]
-    G --> H[Merge nearby detections into time segments]
-    H --> I[Send segments to the dashboard]
+    F -- Yes --> G["Record hit:<br/>time + confidence"]
+    G --> H["Merge nearby detections<br/>into time segments"]
+    H --> I["Send segments<br/>to dashboard"]
 ```
 
 1. **Sample frames.** Checking every frame is slow and unnecessary, so the backend looks at every 3rd frame.
@@ -349,14 +349,14 @@ cd frontend && npm test     # frontend
 
 ```mermaid
 flowchart LR
-    C[8 lane cameras] -->|live video| E[Edge computer at the junction]
-    E -->|detector + decision logic| R[Preemption request]
-    R --> S[Signal controller]
-    S --> L[Signal lights]
-    S -. safety checks .-> L
-    E --> D[Monitoring dashboard]
-    E --> G[Event log]
-    O[Operator] -->|manual override| S
+    C["8 lane<br/>cameras"] -->|"live video"| E["Edge computer<br/>at junction"]
+    E -->|"detection &<br/>decision logic"| R["Preemption<br/>request"]
+    R --> S["Signal<br/>controller"]
+    S --> L["Signal<br/>lights"]
+    S -. "safety checks" .-> L
+    E --> D["Monitoring<br/>dashboard"]
+    E --> G["Event<br/>log"]
+    O["Operator"] -->|"manual override"| S
 ```
 
 ### What would need to change
