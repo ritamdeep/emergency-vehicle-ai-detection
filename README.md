@@ -67,7 +67,7 @@ flowchart LR
 
 ---
 
-## Try it on your own computer
+## Installation and Setup
 
 Anyone can run this project on their own computer in about 15 minutes. Nothing is installed globally, you don't need an account, and everything stays on your machine.
 
@@ -239,6 +239,69 @@ Example response (shortened):
   "segments": [{ "start_sec": 2.0, "end_sec": 5.4, "confidence": 0.946 }]
 }
 ```
+## How the AI model works
+
+### In one minute
+
+The detector is **YOLOv11 nano**. "YOLO" stands for *You Only Look Once*: instead of searching an image piece by piece, it looks at the whole picture in a single pass and directly predicts **where each vehicle is** (a box), **what it is** (a class such as ambulance) and **how sure it is** (a confidence score from 0 to 1). The "nano" version is the smallest and fastest one, which is why it can run on an ordinary laptop CPU.
+
+A confident box alone can still be wrong, so the project adds a second check that looks for the **flashing red and blue siren lights**. An ambulance is confirmed only when both checks agree.
+
+### Step by step
+
+```mermaid
+flowchart TD
+    A[Video file] --> B[Pick every 3rd frame]
+    B --> C[Resize to 640 × 640]
+    C --> D[YOLOv11 finds vehicles: box + class + confidence]
+    D --> E{Is it the ambulance class?}
+    E -- No --> B
+    E -- Yes --> F{Confidence high enough, or siren lights seen?}
+    F -- No --> B
+    F -- Yes --> G[Record: time + confidence]
+    G --> H[Merge nearby detections into time segments]
+    H --> I[Send segments to the dashboard]
+```
+
+1. **Sample frames.** Checking every frame is slow and unnecessary, so the backend looks at every 3rd frame.
+2. **Resize.** Each frame is resized to 640 × 640 pixels, the size the model expects.
+3. **Detect.** YOLO returns every vehicle it finds, each with a box, a class and a confidence score.
+4. **Keep ambulances only.** Cars, trucks and buses are ignored.
+5. **Double-check.** A detection is accepted if its confidence is at least **0.20**, or if the **siren-light check** finds flashing red or blue lights.
+6. **Build time segments.** Detections that are less than about 1.5 seconds apart are merged into one segment, for example "ambulance visible from 2.0 s to 5.4 s". This bridges the moments when the model misses a frame or the siren is in a dark phase of its flash.
+7. **Report.** The backend sends the segments to the dashboard, which uses them to switch the signals on and back off.
+
+### Why two checks?
+
+| Check | What it catches | Weakness on its own |
+|---|---|---|
+| **YOLO detection** | Vehicles that look like ambulances (shape, colour, markings) | Can mistake a similar van or a poster for an ambulance |
+| **Siren-light check** | Flashing red and blue lights on the roof | Only works when the lights are on and visible |
+
+The siren check looks only at the **top 35% of the vehicle's box**, where the roof lights are, and tests the colours in HSV (hue, saturation, brightness). This ignores brake lights and headlights, which are in different places and colours. Using both checks lowers false alarms.
+
+The confidence threshold is deliberately low (0.20) so that real ambulances are not missed. Missing an ambulance is worse than a brief false alarm.
+
+### What the numbers mean
+
+Measured on 2,123 validation images the model had not trained on:
+
+| Metric | Result | In plain words |
+|---|---|---|
+| Precision | 83.9% | When it says "ambulance", it is right about 84 times out of 100 |
+| Recall | 84.9% | It finds about 85 out of every 100 real ambulances |
+| mAP@50 | 88.1% | Overall detection quality when a box counts if it overlaps the true box by at least 50% |
+
+Out of 484 ambulances in the validation set, it found 411 and missed 73. It raised 79 false alarms among 1,639 images with no ambulance.
+
+### Where things are
+
+| What | Where |
+|---|---|
+| Trained weights used by the API | `models/best.pt` |
+| Training and evaluation scripts | `training/train.py`, `training/val.py` |
+| Training curves and confusion matrix | `training/results/` |
+| Detection and siren-check code | `backend/inference.py`, `backend/api_server.py` |
 
 ## Model results
 
@@ -268,8 +331,54 @@ cd frontend && npm test     # frontend
 - The signal controller is a software simulation and is not connected to real traffic lights.
 - Ideas for the future: live RTSP camera input, siren sound detection, GPS from the ambulance, and more training data.
 
+## From demo to a real intersection
+
+> **Important:** this dashboard is a **demo and simulation** built to show the idea. It must not be connected to real traffic lights. A real deployment needs approval from the traffic authority and safety-certified hardware.
+
+### What is real and what is simulated
+
+| Part | In this project (demo) | At a real intersection |
+|---|---|---|
+| Camera input | Uploaded video files, one per lane | Live streams from 8 cameras, one per lane |
+| AI detection | A backend that scans a finished video file | A small computer at the junction analysing the live stream continuously |
+| Decision logic | A React program that decides when to give priority and when to return to normal | The same rules (grace time, clearance buffer), running on the junction computer |
+| Traffic lights | Drawn on the screen | Physical signal heads run by the junction's **signal controller** |
+| Dashboard | The main way to use the system | An optional screen for operators to monitor and override |
+
+### How it could work in a real setup
+
+```mermaid
+flowchart LR
+    C[8 lane cameras] -->|live video| E[Edge computer at the junction]
+    E -->|detector + decision logic| R[Preemption request]
+    R --> S[Signal controller]
+    S --> L[Signal lights]
+    S -. safety checks .-> L
+    E --> D[Monitoring dashboard]
+    E --> G[Event log]
+    O[Operator] -->|manual override| S
+```
+
+### What would need to change
+
+1. **Live video instead of uploads.** Read frames from the cameras' network streams (RTSP) and run detection continuously. The same timing rules still apply: the ambulance must be absent for 1.5 seconds before the system starts to clear, followed by a 3-second safety buffer.
+2. **Run the model at the junction.** An edge computer next to the cabinet, for example a small GPU board, avoids depending on the internet and keeps delay low. The model would be exported to a faster format such as ONNX or TensorRT.
+3. **Ask the controller, never force it.** The software should not switch lamps directly. It sends a *priority request* to the signal controller through the interface the controller supports. The controller decides when it is safe, keeping its own minimum green, yellow and all-red times.
+4. **Build in fail-safes.**
+   - If the AI system stops, crashes or loses a camera, the junction goes back to its **normal cycle**.
+   - Require the ambulance to be seen in several frames before requesting priority.
+   - Limit how long priority can be held.
+   - Give operators a manual override, and log every decision.
+5. **Train on local footage.** Collect video from the actual cameras, including night, rain and glare, and local ambulance designs. Measure accuracy for each camera before relying on it.
+6. **Test safely and get approval.** Try it first in a traffic simulator (for example SUMO), then in a supervised pilot with the traffic authority. Handle CCTV footage under the applicable privacy rules.
+7. **Add more evidence (optional).** Combining the camera with siren **sound** detection or the ambulance's **GPS position** would reduce missed detections and false alarms.
+
+### What the dashboard becomes
+
+In a real system the React dashboard stops being the controller and becomes a **monitoring screen**. It would show live camera status, the current signal state, active emergencies, the event timeline and detection statistics, plus a button for operators to cancel priority. The Junction, Cameras, Analysis and Activity pages already match that role.
+
 ## Credits and license
 
-This project is based on [vishalsoni2006/emergency-vehicle-project](https://github.com/vishalsoni2006/emergency-vehicle-project) and its contributors. This version adds a redesigned light interface with separate pages and guides, automatic return to normal traffic flow, time-segment detection, real analysis numbers and tests.
+This project is based on [vishalsoni2006/emergency-vehicle-project](https://github.com/vishalsoni2006/emergency-vehicle-project) and its contributors.
 
 Released under the MIT License, as stated by the original project.
