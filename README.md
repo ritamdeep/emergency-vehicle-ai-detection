@@ -253,7 +253,7 @@ A confident box alone can still be wrong, so the project adds a second check tha
 flowchart TD
     A["Video file"] --> B["Pick every<br/>3rd frame"]
     B --> C["Resize to<br/>640 × 640"]
-    C --> D["YOLOv11 (box + class<br/>+ confidence)"]
+    C --> D["YOLOv11 (box<br/>+class+confidence)"]
     D --> E{"Ambulance<br/>class?"}
     E -- No --> B
     E -- Yes --> F{"Confidence &ge; 0.20<br/>or siren lights?"}
