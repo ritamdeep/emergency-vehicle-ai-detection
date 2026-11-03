@@ -178,7 +178,7 @@ Checks server and model status.
 ```
 
 ### POST /detect or POST /process-video
-Processes an uploaded CCTV lane video and evaluates emergency preemption.
+Processes an uploaded CCTV lane video and evaluates emergency preemption across full clip duration.
 - Request: `multipart/form-data`
   - `video`: Video file (.mp4, .avi, .mov)
   - `lane_id`: Integer between 1 and 8
@@ -191,9 +191,24 @@ Processes an uploaded CCTV lane video and evaluates emergency preemption.
   "road_id": 3,
   "signal_id": 3,
   "emergency": true,
+  "fps": 30.0,
+  "total_frames": 360,
+  "frames_scanned": 120,
+  "duration_sec": 12.0,
+  "processing_time_sec": 0.85,
+  "processing_fps": 141.2,
+  "truncated": false,
+  "segments": [
+    {
+      "start_sec": 1.4,
+      "end_sec": 6.8,
+      "confidence": 0.946
+    }
+  ],
   "detections": [
     {
-      "frame": 120,
+      "frame": 42,
+      "timestamp_sec": 1.4,
       "confidence": 0.946,
       "siren_active": true
     }
@@ -240,28 +255,108 @@ Evaluation performed on 2,123 validation images (2,763 instances):
 
 ---
 
-## Cloud Deployment Guide
+## Architecture & Deployment
 
-### 1. Streamlit Community Cloud
-- Push this repository to GitHub.
-- Sign in to Streamlit Community Cloud (share.streamlit.io).
-- Select your repository and set the entry file to `app.py`.
-- Deployment installs system dependencies via `packages.txt` and libraries via `requirements.txt`.
+This project operates on a decoupled, three-tier cloud architecture designed for cost-free, production-grade deployment:
 
-### 2. Hugging Face Spaces
-- Create a new Space with the Streamlit SDK.
-- Push this repository to the Space Git remote.
-- The platform automatically detects `packages.txt` and starts `app.py`.
+```
+┌─────────────────────────────────┐       ┌──────────────────────────────────────┐
+│         Vercel (Frontend)       │       │    Hugging Face Spaces (AI Backend)  │
+│  - React 19 + Vite SPA          │ ───►  │  - FastAPI + Python 3.11 Docker      │
+│  - Client-side Hash Routing     │       │  - Ultralytics YOLOv11 Nano          │
+│  - Root Directory = frontend    │       │  - Port 7860                         │
+└─────────────────────────────────┘       └──────────────────────────────────────┘
+                 ▲                                           ▲
+                 │                                           │
+                 └───────────────────┬───────────────────────┘
+                                     │
+                       ┌───────────────────────────┐
+                       │    GitHub (Source Repo)   │
+                       │  ritamdeep/               │
+                       │  emergency-vehicle-ai-    │
+                       │  detection                │
+                       └───────────────────────────┘
+```
 
-### 3. Vercel Architecture Notes
-Streamlit cannot run natively on Vercel Serverless Functions due to file size limits (50MB zipped / 250MB uncompressed) and execution timeouts.
-For production deployments targeting Vercel:
-- Deploy the React frontend (`frontend/`) directly to Vercel.
-- Deploy the FastAPI backend (`api_server.py`) to Fly.io, AWS ECS, or Hugging Face Spaces.
-- Configure `VITE_API_URL` in Vercel environment variables to point to the hosted backend URL.
+### 1. Backend: Hugging Face Spaces (Docker)
+
+The backend runs containerized on Hugging Face Spaces using the dedicated deployment files located in [`deploy/hf-space/`](deploy/hf-space/):
+
+1. Go to [Hugging Face Spaces](https://huggingface.co/spaces) and click **Create new Space**.
+2. Set the **Space name** to `emergency-vehicle-api` under your username (resulting in `https://ritamdeep-emergency-vehicle-api.hf.space`).
+3. Select **Docker** as the Space SDK and **Blank** as the template (free CPU tier).
+4. In your Space repository, commit the two files from `deploy/hf-space/`:
+   - `README.md` (contains Space metadata YAML with `sdk: docker` and `app_port: 7860`)
+   - `Dockerfile` (builds Python 3.11-slim, clones the repo, installs dependencies, and serves on port 7860)
+5. Hugging Face will automatically build and launch the container.
+6. Verify deployment by visiting `https://ritamdeep-emergency-vehicle-api.hf.space/health` (should return `status: online`).
+
+> **Known Limits (Free CPU Tier):**
+> - Free Spaces sleep after 48 hours of inactivity. The first request after sleeping may take 30–60 seconds to cold-start.
+> - For optimal inference latency on CPU, test with video clips between 5 and 15 seconds.
+
+---
+
+### 2. Frontend: Vercel
+
+The frontend is a lightweight React 19 + Vite SPA that builds to static assets:
+
+1. Import your GitHub repository (`ritamdeep/emergency-vehicle-ai-detection`) in [Vercel](https://vercel.com).
+2. Set the **Root Directory** to `frontend`.
+3. In **Environment Variables**, add:
+   - `VITE_API_URL` = `https://ritamdeep-emergency-vehicle-api.hf.space` *(ensure no trailing slash)*
+4. Click **Deploy**. Vercel will install dependencies via `npm ci` and build the application using `vite build`.
+
+> **Note:** Because Vite bakes `VITE_API_URL` into client-side bundles at build time, any changes to this environment variable in Vercel require triggering a redeployment. If `VITE_API_URL` is omitted, the frontend automatically activates self-contained Demo / Offline mode with explicit indicators.
+
+---
+
+### 3. Local Development
+
+To run the full stack locally:
+
+```bash
+# Terminal 1: Backend API
+python -m uvicorn api_server:app --host 127.0.0.1 --port 8000
+
+# Terminal 2: Frontend
+cd frontend
+npm run dev
+```
+
+Visit `http://localhost:5173` to access the local command center.
+
+---
+
+## Acknowledgements & Credits
+
+This project is based on and extends the original work from [vishalsoni2006/emergency-vehicle-project](https://github.com/vishalsoni2006/emergency-vehicle-project), licensed under the MIT License.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License.
+```text
+MIT License
+
+Copyright (c) 2026 Ritam Deep Chowdhury
+Original Work Copyright (c) 2026 Vishal Soni
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
