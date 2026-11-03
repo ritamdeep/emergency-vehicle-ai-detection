@@ -14,8 +14,13 @@ Endpoints:
 import os
 import shutil
 import tempfile
+import time
+import math
 import cv2
 import numpy as np
+
+os.environ.setdefault("YOLO_CONFIG_DIR", os.path.abspath(".ultralytics"))
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
@@ -23,24 +28,42 @@ from ultralytics import YOLO
 # Import inference utilities from existing codebase
 from config import MODEL_REGISTRY, EMERGENCY_CONF_THRESH
 from inference import check_siren_hsv, filter_contained_boxes
+from segments import merge_hits_into_segments
+
+STRIDE = 3
+MAX_SCAN_SECONDS = 300
+SEGMENT_MERGE_GAP_SEC = 1.5
 
 app = FastAPI(title="Emergency Ambulance Traffic Preemption API")
 
 # Enable Cross-Origin Resource Sharing (CORS) for Frontend
+# Note: allow_credentials must be False when allow_origins is ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Load existing YOLO model weights
-WEIGHTS_PATH = "runs/detect/train_emergency_v2/weights/best.pt"
-if not os.path.exists(WEIGHTS_PATH):
-    WEIGHTS_PATH = "runs/detect/runs/detect/train_emergency/weights/best.pt"
-if not os.path.exists(WEIGHTS_PATH):
-    WEIGHTS_PATH = "yolo11n.pt"
+# Candidate weight paths in priority order
+CANDIDATE_WEIGHTS = [
+    "runs/detect/train_emergency_v2/weights/best.pt",
+    "runs/detect/runs/detect/train_emergency_v2/weights/best.pt",
+    "runs/detect/runs/detect/train_emergency/weights/best.pt",
+    "runs/detect/train_emergency/weights/best.pt",
+    "best.pt",
+    "yolo11n.pt",
+]
+
+WEIGHTS_PATH = None
+for candidate in CANDIDATE_WEIGHTS:
+    if os.path.exists(candidate):
+        WEIGHTS_PATH = candidate.replace("\\", "/")
+        break
+
+if not WEIGHTS_PATH:
+    raise FileNotFoundError("No model weights file could be located in candidate paths.")
 
 print(f"[API Server] Loading YOLO checkpoint: {WEIGHTS_PATH}")
 model = YOLO(WEIGHTS_PATH)
@@ -58,19 +81,25 @@ def health_check():
 
 @app.post("/detect")
 @app.post("/process-video")
-async def detect_ambulance(
+def detect_ambulance(
     video: UploadFile = File(...),
     lane_id: int = Form(1)
 ):
     """
-    Ingests video for a specific lane, runs YOLO inference and HSV siren validation,
-    and returns detection decision and confidence.
+    Ingests video for a specific lane, runs YOLO inference and HSV siren validation
+    across the entire video stream, clusters detections into continuous segments,
+    and returns comprehensive detection and processing telemetry.
+    
+    Declared as synchronous 'def' so FastAPI executes it in an external threadpool,
+    preventing blocking of concurrent asynchronous endpoints such as /health.
     """
     if lane_id < 1 or lane_id > 8:
         raise HTTPException(status_code=400, detail="Lane ID must be between 1 and 8.")
 
+    start_perf = time.perf_counter()
+
     # Save uploaded video to temporary file
-    suffix = os.path.splitext(video.filename)[1] or ".mp4"
+    suffix = os.path.splitext(video.filename or "")[1] or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
         tmp_path = tmp_file.name
         shutil.copyfileobj(video.file, tmp_file)
@@ -80,21 +109,41 @@ async def detect_ambulance(
         if not cap.isOpened():
             raise HTTPException(status_code=400, detail="Could not decode uploaded video stream.")
 
-        frame_idx = 0
-        ambulance_found = False
-        max_confidence = 0.0
-        detections_list = []
+        raw_fps = cap.get(cv2.CAP_PROP_FPS)
+        if raw_fps is None or math.isnan(raw_fps) or raw_fps <= 0:
+            video_fps = 30.0
+        else:
+            video_fps = float(raw_fps)
 
-        # Sample every 3rd frame for rapid response
+        total_cap_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_cap_frames < 0:
+            total_cap_frames = 0
+
+        frame_idx = 0
+        frames_scanned = 0
+        truncated = False
+        hits = []
+        detections_list = []
+        max_confidence = 0.0
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
             frame_idx += 1
-            if frame_idx % 3 != 0:
+            t_sec = (frame_idx - 1) / video_fps
+
+            # Safety cap check
+            if t_sec > MAX_SCAN_SECONDS:
+                truncated = True
+                break
+
+            # Stride sub-sampling
+            if frame_idx % STRIDE != 0:
                 continue
 
+            frames_scanned += 1
             frame_resized = cv2.resize(frame, (640, 640))
             results = model(frame_resized, verbose=False, conf=0.10)
 
@@ -105,7 +154,7 @@ async def detect_ambulance(
                     conf = float(box.conf[0])
                     class_name = str(model.names[cls_id]).lower()
 
-                    is_ambulance = (cls_id == 0) or ('ambulance' in class_name)
+                    is_ambulance = (cls_id == 0) or ('ambulance' in class_name) or ('fire' in class_name)
                     if not is_ambulance:
                         continue
 
@@ -114,20 +163,30 @@ async def detect_ambulance(
                     siren_active = check_siren_hsv(frame_resized, x1, y1, x2, y2)
 
                     if conf >= EMERGENCY_CONF_THRESH or siren_active:
-                        ambulance_found = True
                         if conf > max_confidence:
                             max_confidence = conf
+
+                        hits.append((t_sec, conf))
                         detections_list.append({
                             "frame": frame_idx,
+                            "time_sec": round(t_sec, 3),
                             "confidence": round(conf, 3),
                             "siren_active": siren_active
                         })
 
-            # Early exit if strong detection identified to minimize turnaround latency
-            if len(detections_list) >= 15:
-                break
-
         cap.release()
+
+        proc_time_sec = round(time.perf_counter() - start_perf, 3)
+        actual_total_frames = max(total_cap_frames, frame_idx)
+        duration_sec = round(frame_idx / video_fps, 3) if video_fps > 0 else 0.0
+        proc_fps = round(frames_scanned / proc_time_sec, 2) if proc_time_sec > 0 else 0.0
+
+        # Cluster hits into temporal segments
+        segments = merge_hits_into_segments(hits, gap_sec=SEGMENT_MERGE_GAP_SEC)
+        ambulance_found = len(segments) > 0
+
+        # Sort top 10 detections by confidence descending
+        top_detections = sorted(detections_list, key=lambda d: d["confidence"], reverse=True)[:10]
 
         # Map lane to Road and Signal:
         # Lane 1, 2 -> Road 1, Signal 1
@@ -144,7 +203,15 @@ async def detect_ambulance(
             "road_id": road_id,
             "signal_id": signal_id,
             "emergency": ambulance_found,
-            "detections": detections_list[:10]  # Return top detection samples
+            "detections": top_detections,
+            "segments": segments,
+            "fps": round(video_fps, 2),
+            "total_frames": actual_total_frames,
+            "frames_scanned": frames_scanned,
+            "duration_sec": duration_sec,
+            "processing_time_sec": proc_time_sec,
+            "processing_fps": proc_fps,
+            "truncated": truncated
         }
 
     finally:

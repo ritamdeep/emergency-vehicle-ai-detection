@@ -1,34 +1,84 @@
-import React, { useState, useRef } from 'react';
-import { Upload, Video, CheckCircle2, AlertTriangle, Loader2, Sparkles, X } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Upload, Video, Sparkles, Loader2, AlertCircle } from 'lucide-react';
 import { apiService } from '../services/api';
+import { TRAFFIC_CONFIG } from '../config/trafficConfig';
+import { getActiveSegment } from '../utils/segmentUtils';
+import InfoTooltip from './common/InfoTooltip';
 
 /**
- * CCTV Lane Video Upload Card Component
+ * VideoUploadCard Component
  * 
- * Supports:
- * - Drag and drop video file selection
- * - Video player preview
- * - Progress lifecycle: IDLE -> UPLOADING -> PROCESSING -> AI DETECTION -> COMPLETE
- * - Bounding box visualization overlay
- * - Real API integration via apiService.detectAmbulance(file, laneId)
- * - Demo mode instant trigger
+ * CCTV Camera Lane Card with segment-synchronized detection:
+ * - Removes video loop; plays when detection result arrives.
+ * - getActiveSegment tracks entered/left boundaries with preroll and grace buffers.
+ * - Truthful status: 'No video' / 'Analyzing' / 'Clear' / 'Ambulance' / 'Server unreachable'.
+ * - Confidence readout visible ONLY while inside active segment.
+ * - Demo mode fallbacks clearly labeled with 'Simulated' tag.
  */
 export default function VideoUploadCard({
   laneId,
-  roadName = `Road`,
+  roadName = 'Road',
   isEmergencyActive = false,
-  demoMode = false,
+  demoMode = true,
   onAmbulanceDetected,
   onAmbulanceCleared,
   onVideoProcessed,
   onLogEvent,
 }) {
-  const [file, setFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
-  const [status, setStatus] = useState('IDLE'); // 'IDLE' | 'UPLOADING' | 'PROCESSING' | 'AI_DETECTION' | 'COMPLETE'
+  const [status, setStatus] = useState('IDLE'); // 'IDLE' | 'UPLOADING' | 'PROCESSING' | 'AI_DETECTION' | 'COMPLETE' | 'ERROR'
   const [detectionResult, setDetectionResult] = useState(null);
+  const [segments, setSegments] = useState([]);
+  const [activeSegment, setActiveSegment] = useState(null);
+  const [isSimulated, setIsSimulated] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
+
+  const videoRef = useRef(null);
   const fileInputRef = useRef(null);
+  const activeSegmentRef = useRef(null);
+
+  // Clear active emergency on component unmount
+  useEffect(() => {
+    return () => {
+      if (activeSegmentRef.current) {
+        activeSegmentRef.current = null;
+        onAmbulanceCleared?.(laneId);
+      }
+    };
+  }, [laneId, onAmbulanceCleared]);
+
+  // Handle video timestamp progression & edge-triggered boundaries
+  const handleTimeUpdate = () => {
+    if (!videoRef.current || segments.length === 0) return;
+    const t = videoRef.current.currentTime;
+
+    const match = getActiveSegment(segments, t, {
+      preroll: TRAFFIC_CONFIG.TIMINGS.SEGMENT_PREROLL_SEC,
+      grace: TRAFFIC_CONFIG.TIMINGS.AMBULANCE_GRACE_SEC,
+    });
+
+    if (match && !activeSegmentRef.current) {
+      // ENTER segment
+      activeSegmentRef.current = match;
+      setActiveSegment(match);
+      onAmbulanceDetected?.(laneId, match.confidence, detectionResult?.detections || []);
+    } else if (!match && activeSegmentRef.current) {
+      // LEAVE segment
+      activeSegmentRef.current = null;
+      setActiveSegment(null);
+      onAmbulanceCleared?.(laneId);
+    }
+  };
+
+  // Clear when video finishes playing
+  const handleVideoEnded = () => {
+    if (activeSegmentRef.current) {
+      activeSegmentRef.current = null;
+      setActiveSegment(null);
+      onAmbulanceCleared?.(laneId);
+    }
+  };
 
   // Handle file selection
   const handleFileChange = (selectedFile) => {
@@ -38,78 +88,161 @@ export default function VideoUploadCard({
       return;
     }
 
-    setFile(selectedFile);
+    // Clear any previous active emergency on this lane before switching video
+    if (activeSegmentRef.current) {
+      activeSegmentRef.current = null;
+      setActiveSegment(null);
+      onAmbulanceCleared?.(laneId);
+    }
+
     const url = URL.createObjectURL(selectedFile);
     setPreviewUrl(url);
     setStatus('IDLE');
     setDetectionResult(null);
+    setSegments([]);
+    setErrorMessage(null);
+    setIsSimulated(false);
 
-    // Automatically trigger processing
     processVideo(selectedFile);
   };
 
   // Video processing pipeline
   const processVideo = async (videoFile) => {
     try {
-      // 1. Uploading state
       setStatus('UPLOADING');
       onLogEvent?.(`CCTV Lane ${laneId}: Uploading ${videoFile.name}...`, 'info');
-      await new Promise(r => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 300));
 
-      // 2. Processing state
       setStatus('PROCESSING');
-      onLogEvent?.(`CCTV Lane ${laneId}: Running frame extraction & decoding...`, 'info');
-      await new Promise(r => setTimeout(r, 800));
+      onLogEvent?.(`CCTV Lane ${laneId}: Decoding video frames...`, 'info');
+      await new Promise(r => setTimeout(r, 400));
 
-      // 3. AI Detection state
       setStatus('AI_DETECTION');
-      onLogEvent?.(`CCTV Lane ${laneId}: YOLOv11 Neural Detection & HSV Siren scan in progress...`, 'info');
+      onLogEvent?.(`CCTV Lane ${laneId}: Running full YOLOv11 + HSV strobe scan...`, 'info');
 
-      // Attempt real backend call
       let result = null;
       try {
         result = await apiService.detectAmbulance(videoFile, laneId);
       } catch (err) {
-        // If backend offline and demoMode is active, synthesize a valid sample response
         if (demoMode) {
-          console.info(`[Demo Mode] Backend unreachable. Simulating AI detection for Lane ${laneId}...`);
-          await new Promise(r => setTimeout(r, 700));
-          // Alternate detection behavior based on lane for realistic variety
-          const isAmbulanceSample = (laneId === 1 || laneId === 5 || laneId === 3);
+          // Honest Demo Mode simulation fallback (15% to 55% of clip duration)
+          const clipDuration = (videoRef.current?.duration && !isNaN(videoRef.current.duration) && videoRef.current.duration > 0)
+            ? videoRef.current.duration
+            : 10.0;
+          
+          const simStart = Number((clipDuration * 0.15).toFixed(2));
+          const simEnd = Number((clipDuration * 0.55).toFixed(2));
+          const simConf = 0.946;
+
+          const simSegment = {
+            start_sec: simStart,
+            end_sec: simEnd,
+            confidence: simConf,
+          };
+
           result = {
-            ambulance_detected: isAmbulanceSample,
-            confidence: isAmbulanceSample ? 0.946 : 0.0,
+            ambulance_detected: true,
+            confidence: simConf,
             lane_id: laneId,
             road_id: Math.ceil(laneId / 2),
             signal_id: Math.ceil(laneId / 2),
-            emergency: isAmbulanceSample,
-            detections: isAmbulanceSample ? [{ frame: 120, confidence: 0.946 }] : []
+            emergency: true,
+            segments: [simSegment],
+            detections: [{ frame: 120, time_sec: simStart, confidence: simConf, siren_active: true }],
+            duration_sec: clipDuration,
+            frames_scanned: Math.round(clipDuration * 30),
+            total_frames: Math.round(clipDuration * 30),
+            processing_time_sec: 0.35,
+            processing_fps: 28.5,
+            simulated: true,
           };
+          setIsSimulated(true);
+          onLogEvent?.(`CCTV Lane ${laneId}: Server unreachable — using simulated detection.`, 'warning');
         } else {
-          throw err;
+          // Backend unreachable and Demo Mode OFF: record nothing, report error
+          setStatus('ERROR');
+          setErrorMessage('Detection server unreachable');
+          onLogEvent?.(`CCTV Lane ${laneId}: Detection failed — server unreachable.`, 'warning');
+          return;
         }
       }
 
-      // 4. Complete state
       setStatus('COMPLETE');
       setDetectionResult(result);
-      onVideoProcessed?.(300, 10, result.ambulance_detected ? result.confidence : null);
+      setSegments(result.segments || []);
+      setErrorMessage(null);
 
-      if (result && result.ambulance_detected) {
-        onAmbulanceDetected?.(laneId, result.confidence, result.detections);
+      // Record real analytics
+      onVideoProcessed?.({
+        frames: result.frames_scanned || result.total_frames || 0,
+        durationSec: result.duration_sec || 0,
+        processingTimeSec: result.processing_time_sec || 0,
+        confidences: (result.segments || []).map(s => s.confidence),
+        simulated: Boolean(result.simulated),
+      });
+
+      // Synchronize video playback from start
+      if (videoRef.current) {
+        videoRef.current.currentTime = 0;
+        videoRef.current.play().catch(() => {});
+      }
+
+      if (result.segments && result.segments.length > 0) {
+        onLogEvent?.(`CCTV Lane ${laneId}: Analysis complete. Found ${result.segments.length} ambulance segment(s).`, 'info');
       } else {
         onLogEvent?.(`CCTV Lane ${laneId}: Analysis complete. Normal traffic detected.`, 'info');
       }
     } catch (error) {
-      console.error(`Error processing video on Lane ${laneId}:`, error);
-      setStatus('COMPLETE');
-      setDetectionResult({
-        ambulance_detected: false,
-        confidence: 0,
-        error: error.message || 'Connection to detection model failed.'
-      });
-      onLogEvent?.(`CCTV Lane ${laneId}: Backend API unavailable (${error.message}). Use DEMO MODE for mock testing.`, 'warning');
+      console.error(`Error on Lane ${laneId}:`, error);
+      setStatus('ERROR');
+      setErrorMessage(error.message || 'Detection failed');
+      onLogEvent?.(`CCTV Lane ${laneId}: Detection failed (${error.message}).`, 'warning');
     }
+  };
+
+  // Manual Simulate Ambulance button
+  const triggerSimulateAmbulance = () => {
+    const simDuration = (videoRef.current?.duration && !isNaN(videoRef.current.duration) && videoRef.current.duration > 0)
+      ? videoRef.current.duration
+      : 10.0;
+
+    const simSegment = {
+      start_sec: Number((simDuration * 0.15).toFixed(2)),
+      end_sec: Number((simDuration * 0.55).toFixed(2)),
+      confidence: 0.946,
+    };
+
+    setIsSimulated(true);
+    setSegments([simSegment]);
+    setDetectionResult({
+      ambulance_detected: true,
+      confidence: 0.946,
+      lane_id: laneId,
+      road_id: Math.ceil(laneId / 2),
+      signal_id: Math.ceil(laneId / 2),
+      segments: [simSegment],
+      simulated: true,
+    });
+
+    onVideoProcessed?.({
+      frames: Math.round(simDuration * 30),
+      durationSec: simDuration,
+      processingTimeSec: 0.3,
+      confidences: [0.946],
+      simulated: true,
+    });
+
+    if (videoRef.current) {
+      videoRef.current.currentTime = 0;
+      videoRef.current.play().catch(() => {});
+    } else {
+      // If no video, immediately trigger preemption with autoClearMs
+      onAmbulanceDetected?.(laneId, 0.946, [{ frame: 120, confidence: 0.946 }], {
+        autoClearMs: TRAFFIC_CONFIG.TIMINGS.DEMO_AUTO_CLEAR_MS
+      });
+    }
+
+    onLogEvent?.(`CCTV Lane ${laneId}: Triggered ambulance simulation.`, 'info');
   };
 
   // Drag and drop handlers
@@ -126,212 +259,159 @@ export default function VideoUploadCard({
     }
   };
 
-  // Demo Simulation Trigger
-  const triggerDemoSimulation = (simulateAmbulance = true) => {
-    setStatus('PROCESSING');
-    setTimeout(() => {
-      setStatus('AI_DETECTION');
-      setTimeout(() => {
-        setStatus('COMPLETE');
-        const res = {
-          ambulance_detected: simulateAmbulance,
-          confidence: simulateAmbulance ? 0.946 : 0.0,
-          lane_id: laneId,
-          emergency: simulateAmbulance,
-        };
-        setDetectionResult(res);
-        onVideoProcessed?.(300, 10, simulateAmbulance ? 0.946 : null);
+  const isBusy = status === 'UPLOADING' || status === 'PROCESSING' || status === 'AI_DETECTION';
+  const isInsideSegment = Boolean(activeSegment);
+  const confidenceScore = isInsideSegment ? (activeSegment.confidence * 100).toFixed(0) : null;
 
-        if (simulateAmbulance) {
-          onAmbulanceDetected?.(laneId, 0.946, [{ frame: 120, confidence: 0.946 }]);
-        } else {
-          onLogEvent?.(`CCTV Lane ${laneId}: Simulated normal traffic — no ambulance detected.`, 'info');
-        }
-      }, 700);
-    }, 600);
-  };
+  // Truthful lane status
+  let statusText = 'No video';
+  let statusBadgeStyle = 'text-slate-400 bg-slate-100';
 
-  const hasAmbulance = detectionResult?.ambulance_detected;
+  if (isBusy) {
+    statusText = 'Analyzing';
+    statusBadgeStyle = 'text-blue-600 bg-blue-50';
+  } else if (errorMessage) {
+    statusText = 'Server unreachable';
+    statusBadgeStyle = 'text-amber-700 bg-amber-50';
+  } else if (isInsideSegment || isEmergencyActive) {
+    statusText = 'Ambulance';
+    statusBadgeStyle = 'text-red-700 bg-red-50';
+  } else if (previewUrl) {
+    statusText = 'Clear';
+    statusBadgeStyle = 'text-emerald-700 bg-emerald-50';
+  }
 
   return (
     <div
-      className={`glass-panel rounded-2xl p-4 flex flex-col justify-between transition-all duration-300 relative ${
-        isEmergencyActive
-          ? 'emergency-pulse-border bg-rose-950/25 shadow-[0_0_20px_rgba(244,63,94,0.3)]'
-          : hasAmbulance
-            ? 'border-rose-500/60 bg-rose-950/15'
-            : 'border-white/10 hover:border-white/20'
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`group relative bg-white rounded-2xl border transition-all duration-200 overflow-hidden shadow-xs hover:shadow-md ${
+        isDragging
+          ? 'border-blue-500 bg-blue-50/50'
+          : isInsideSegment
+            ? 'border-red-400 ring-2 ring-red-400/30'
+            : errorMessage
+              ? 'border-amber-300'
+              : 'border-slate-200/90'
       }`}
     >
-      {/* Top Card Header */}
-      <div>
-        <div className="flex items-center justify-between pb-2 mb-3 border-b border-white/10">
-          <div>
-            <span className="text-xs font-black font-display text-white tracking-wider">
-              CCTV LANE {laneId}
-            </span>
-            <span className="text-[10px] font-mono text-slate-400 block">
-              {roadName}
-            </span>
-          </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="video/*"
+        onChange={(e) => handleFileChange(e.target.files?.[0])}
+        className="hidden"
+      />
 
-          {/* Status Badge */}
-          {status === 'IDLE' && (
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-800 text-slate-400">
-              STANDBY
-            </span>
-          )}
-          {status === 'UPLOADING' && (
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1">
-              <Loader2 className="w-2.5 h-2.5 animate-spin" /> UPLOADING
-            </span>
-          )}
-          {status === 'PROCESSING' && (
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center gap-1">
-              <Loader2 className="w-2.5 h-2.5 animate-spin" /> PROCESSING
-            </span>
-          )}
-          {status === 'AI_DETECTION' && (
-            <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30 flex items-center gap-1 animate-pulse">
-              <Loader2 className="w-2.5 h-2.5 animate-spin" /> AI SCANNING
-            </span>
-          )}
-          {status === 'COMPLETE' && (
-            <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
-              hasAmbulance
-                ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
-                : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-            }`}>
-              {hasAmbulance ? '🚨 AMBULANCE' : 'NORMAL'}
-            </span>
-          )}
+      {/* Card Header: Lane, Road, Truthful Status */}
+      <div className="p-3.5 border-b border-slate-100 flex items-center justify-between bg-slate-50/60">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-bold text-slate-800">
+            Lane {laneId}
+          </span>
+          <span className="text-[11px] text-slate-500">
+            ({roadName})
+          </span>
+          <InfoTooltip topicId="cctv-lane-feeds" label={`Lane ${laneId} feed`} />
         </div>
 
-        {/* Video Preview or Drag & Drop Area */}
-        <div
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          className={`relative w-full aspect-video rounded-xl overflow-hidden border transition-all flex flex-col items-center justify-center ${
-            isDragging
-              ? 'border-cyan-400 bg-cyan-950/30'
-              : previewUrl
-                ? 'border-white/10 bg-black'
-                : 'border-dashed border-white/15 bg-slate-900/40 hover:bg-slate-900/60'
-          }`}
-        >
-          {previewUrl ? (
-            <div className="relative w-full h-full">
-              <video
-                src={previewUrl}
-                className="w-full h-full object-cover"
-                autoPlay
-                muted
-                loop
-                playsInline
+        {/* Truthful Status Badge */}
+        <div className="flex items-center gap-1.5">
+          {isSimulated && (
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold">
+              Simulated
+            </span>
+          )}
+
+          <span className={`inline-flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full ${statusBadgeStyle}`}>
+            {isBusy ? (
+              <Loader2 className="w-3 h-3 animate-spin text-blue-600" />
+            ) : errorMessage ? (
+              <AlertCircle className="w-3 h-3 text-amber-600" />
+            ) : (
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  isInsideSegment ? 'bg-red-600 animate-ping' : previewUrl ? 'bg-emerald-500' : 'bg-slate-300'
+                }`}
               />
-
-              {/* Bounding Box Visualizer Overlay */}
-              {hasAmbulance && (
-                <div className="absolute inset-4 border-2 border-rose-500 rounded-md pointer-events-none shadow-[0_0_15px_#f43f5e] flex flex-col justify-start">
-                  <div className="bg-rose-600 text-white font-mono text-[9px] font-bold px-1.5 py-0.5 self-start rounded-br shadow">
-                    AMBULANCE {((detectionResult?.confidence || 0.946) * 100).toFixed(1)}%
-                  </div>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="text-center p-3">
-              <Upload className="w-6 h-6 text-slate-400 mx-auto mb-1 opacity-70" />
-              <div className="text-[11px] font-medium text-slate-300">
-                Drag CCTV Video Here
-              </div>
-              <div className="text-[9px] text-slate-400 mt-0.5">
-                or click Upload Video below
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Filename Readout */}
-        {file && (
-          <div className="text-[10px] font-mono text-slate-400 truncate mt-1.5 flex items-center justify-between">
-            <span className="truncate">📁 {file.name}</span>
-            <button
-              onClick={() => {
-                setFile(null);
-                setPreviewUrl(null);
-                setStatus('IDLE');
-                setDetectionResult(null);
-              }}
-              className="text-slate-400 hover:text-white ml-1"
-              title="Remove video"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </div>
-        )}
-
-        {/* Detection Information Grid */}
-        <div className="grid grid-cols-2 gap-2 mt-3 pt-2.5 border-t border-white/5">
-          <div className="bg-slate-950/60 p-2 rounded-lg border border-white/5">
-            <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">
-              Ambulance
-            </div>
-            <div className={`text-xs font-mono font-bold mt-0.5 ${
-              hasAmbulance ? 'text-rose-400 font-black' : 'text-slate-300'
-            }`}>
-              {status === 'IDLE' 
-                ? 'STANDBY' 
-                : hasAmbulance 
-                  ? 'DETECTED' 
-                  : 'NOT DETECTED'}
-            </div>
-          </div>
-
-          <div className="bg-slate-950/60 p-2 rounded-lg border border-white/5">
-            <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">
-              Confidence
-            </div>
-            <div className="text-xs font-mono font-bold text-cyan-300 mt-0.5">
-              {hasAmbulance 
-                ? `${((detectionResult?.confidence || 0) * 100).toFixed(1)}%` 
-                : '--'}
-            </div>
-          </div>
+            )}
+            {statusText}
+          </span>
         </div>
       </div>
 
-      {/* Action Buttons */}
-      <div className="mt-3 flex flex-col gap-1.5">
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="video/*"
-          className="hidden"
-          onChange={(e) => handleFileChange(e.target.files?.[0])}
-        />
-
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={status === 'PROCESSING' || status === 'AI_DETECTION'}
-          className="w-full py-1.5 px-3 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 active:scale-[0.98] border border-slate-600 text-white flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
-        >
-          <Upload className="w-3.5 h-3.5" />
-          Upload Video
-        </button>
-
-        {/* Demo Mode Quick Simulation Trigger */}
-        {demoMode && (
-          <button
-            onClick={() => triggerDemoSimulation(true)}
-            className="w-full py-1 px-2 rounded-lg text-[10px] font-mono font-bold bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 transition-all flex items-center justify-center gap-1"
-            title="Simulate ambulance detection for Lane testing"
-          >
-            <Sparkles className="w-3 h-3" />
-            Simulate Ambulance (Lane {laneId})
-          </button>
+      {/* Video Preview or Upload Dropzone (NO LOOP) */}
+      <div className="relative aspect-video w-full bg-slate-900 flex items-center justify-center overflow-hidden">
+        {previewUrl ? (
+          <video
+            ref={videoRef}
+            src={previewUrl}
+            muted
+            playsInline
+            onTimeUpdate={handleTimeUpdate}
+            onEnded={handleVideoEnded}
+            className="w-full h-full object-cover"
+          />
+        ) : (
+          <div className="text-center p-4">
+            <div className="w-9 h-9 rounded-full bg-slate-800 text-slate-400 mx-auto flex items-center justify-center mb-1.5">
+              <Video className="w-4 h-4" />
+            </div>
+            <span className="text-xs text-slate-400 block font-mono">
+              CCTV-0{laneId} Feed
+            </span>
+          </div>
         )}
+
+        {/* Processing Spinner Overlay */}
+        {isBusy && (
+          <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-xs flex flex-col items-center justify-center text-white p-3 text-center">
+            <Loader2 className="w-6 h-6 animate-spin text-blue-400 mb-1" />
+            <span className="text-xs font-semibold">
+              {status === 'UPLOADING' && 'Uploading video...'}
+              {status === 'PROCESSING' && 'Extracting frames...'}
+              {status === 'AI_DETECTION' && 'YOLO Neural Inference...'}
+            </span>
+          </div>
+        )}
+
+        {/* Hover / Tap Actions Bar (Progressive Disclosure) */}
+        <div className="absolute inset-0 bg-slate-950/75 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity duration-200 flex flex-col items-center justify-center gap-2 p-3">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="w-full py-1.5 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition-colors"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            Upload Video
+          </button>
+
+          <button
+            type="button"
+            onClick={triggerSimulateAmbulance}
+            className="w-full py-1.5 px-3 rounded-lg bg-white/20 hover:bg-white/30 text-white text-xs font-semibold border border-white/30 flex items-center justify-center gap-1.5 transition-colors"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+            Simulate Ambulance
+          </button>
+        </div>
+      </div>
+
+      {/* Card Footer: Confidence Readout (Shows ONLY while inside active segment) */}
+      <div className="p-3 bg-white flex items-center justify-between text-xs">
+        <span className="text-slate-500 flex items-center">
+          Confidence
+          <InfoTooltip topicId="confidence-score" label="Confidence score guide" />
+        </span>
+
+        <span className={`font-mono font-bold ${
+          isInsideSegment
+            ? 'text-red-600 text-sm'
+            : 'text-slate-400'
+        }`}>
+          {confidenceScore ? `${confidenceScore}%` : '--'}
+        </span>
       </div>
     </div>
   );

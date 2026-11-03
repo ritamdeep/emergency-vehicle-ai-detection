@@ -8,18 +8,35 @@
  * - Road 4 (West):  Lanes 7 & 8 -> Signal 4
  */
 
+const resolveApiBaseUrl = () => {
+  const rawUrl = import.meta.env.VITE_API_URL;
+  if (typeof rawUrl === 'string' && rawUrl.trim().length > 0) {
+    return rawUrl.trim().replace(/\/+$/, '');
+  }
+  // In production builds without explicit VITE_API_URL, do not silently hit localhost
+  if (import.meta.env.PROD) {
+    console.warn('[TrafficConfig] VITE_API_URL is not configured in production build. Backend is unconfigured.');
+    return null;
+  }
+  return 'http://localhost:8000';
+};
+
 export const TRAFFIC_CONFIG = {
   // Configurable Signal Cycle Timings (in seconds)
   TIMINGS: {
-    GREEN_DURATION: 10,       // Standard green light duration
-    YELLOW_DURATION: 3,       // Safety transition amber light
-    CLEARANCE_BUFFER: 3,      // Post-ambulance clearance before returning to normal cycle
-    TICK_INTERVAL_MS: 200,    // Controller state machine interval in ms
+    GREEN_DURATION: 10,          // Standard green light duration
+    YELLOW_DURATION: 3,          // Safety transition amber light
+    CLEARANCE_BUFFER: 3,         // Post-ambulance safety clearance before returning to normal cycle
+    AMBULANCE_GRACE_SEC: 1.5,    // Grace buffer after segment ends before declaring ambulance cleared
+    SEGMENT_PREROLL_SEC: 0.2,    // Early trigger buffer before segment start timestamp
+    SEGMENT_MERGE_GAP_SEC: 1.5,  // Max gap in seconds between hits to merge into one segment
+    DEMO_AUTO_CLEAR_MS: 8000,    // Simulated demo preemption auto-clear duration
+    TICK_INTERVAL_MS: 200,       // Controller state machine interval in ms
   },
 
   // API Backend configuration
   API: {
-    BASE_URL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+    BASE_URL: resolveApiBaseUrl(),
     ENDPOINTS: {
       DETECT: '/detect',
       PROCESS_VIDEO: '/process-video',

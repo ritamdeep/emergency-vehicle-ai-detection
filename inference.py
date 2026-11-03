@@ -1,8 +1,14 @@
 import os
 import cv2
 import numpy as np
-import streamlit as st
 from ultralytics import YOLO
+
+try:
+    import streamlit as st
+    cache_decorator = st.cache_resource(show_spinner=False)
+except ImportError:
+    def cache_decorator(func):
+        return func
 
 from config import (
     IOU_TRACK_THRESH,
@@ -14,7 +20,7 @@ from config import (
     COLOR_NORMAL_BGR
 )
 
-@st.cache_resource(show_spinner=False)
+@cache_decorator
 def load_yolo_model(weights_path: str) -> YOLO:
     """
     Cached model loader to prevent redundant model instantiation across Streamlit reruns.

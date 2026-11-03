@@ -1,32 +1,54 @@
 /**
  * API Service Layer for AI-Based Emergency Traffic Signal Management System
  * 
- * Communicates with the existing Python/YOLO detection backend.
+ * Communicates with the Python/YOLO detection backend.
  * Base URL configurable via VITE_API_URL environment variable.
  */
 
 import { TRAFFIC_CONFIG } from '../config/trafficConfig';
 
-const API_BASE_URL = TRAFFIC_CONFIG.API.BASE_URL;
-
 class TrafficApiService {
-  constructor(baseUrl = API_BASE_URL) {
-    this.baseUrl = baseUrl.replace(/\/+$/, '');
+  constructor(baseUrl = TRAFFIC_CONFIG.API.BASE_URL) {
+    this.baseUrl = baseUrl ? baseUrl.replace(/\/+$/, '') : null;
+  }
+
+  isConfigured() {
+    return Boolean(this.baseUrl);
   }
 
   /**
    * Check connection status of the backend API
    */
   async checkHealth() {
+    if (!this.baseUrl) {
+      return { online: false, unconfigured: true, status: 'unconfigured' };
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
     try {
       const response = await fetch(`${this.baseUrl}${TRAFFIC_CONFIG.API.ENDPOINTS.HEALTH}`, {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
+        signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`Health check returned ${response.status}`);
-      return await response.json();
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        return { online: false, unconfigured: false, status: 'offline', error: `HTTP ${response.status}` };
+      }
+
+      const data = await response.json();
+      return { online: true, unconfigured: false, status: 'online', ...data };
     } catch (error) {
-      return { online: false, error: error.message };
+      clearTimeout(timeoutId);
+      return {
+        online: false,
+        unconfigured: false,
+        status: 'offline',
+        error: error.name === 'AbortError' ? 'Health check timed out' : error.message,
+      };
     }
   }
 
@@ -35,17 +57,18 @@ class TrafficApiService {
    * 
    * @param {File} videoFile - The video file to process
    * @param {number} laneId - The lane ID (1 through 8)
-   * @param {function} onProgress - Optional callback for upload progress
    * @returns {Promise<Object>} Detection response
    */
-  async detectAmbulance(videoFile, laneId, onProgress = null) {
+  async detectAmbulance(videoFile, laneId) {
+    if (!this.baseUrl) {
+      throw new Error('Detection server is unconfigured. Set VITE_API_URL or enable Demo Mode.');
+    }
+
     const formData = new FormData();
     formData.append('video', videoFile);
     formData.append('lane_id', laneId.toString());
 
     try {
-      // Primary endpoint: POST /detect
-      // Fallback endpoint supported: POST /process-video
       let endpoint = `${this.baseUrl}${TRAFFIC_CONFIG.API.ENDPOINTS.DETECT}`;
       
       const response = await fetch(endpoint, {
@@ -54,7 +77,7 @@ class TrafficApiService {
       });
 
       if (!response.ok) {
-        // Attempt secondary endpoint if 404
+        // Fallback to secondary endpoint if 404
         if (response.status === 404) {
           const fallbackEndpoint = `${this.baseUrl}${TRAFFIC_CONFIG.API.ENDPOINTS.PROCESS_VIDEO}`;
           const fallbackRes = await fetch(fallbackEndpoint, {
@@ -69,10 +92,9 @@ class TrafficApiService {
         throw new Error(`API error (${response.status}): ${response.statusText}`);
       }
 
-      const result = await response.json();
-      return result;
+      return await response.json();
     } catch (error) {
-      console.warn(`[TrafficApiService] Connection error on lane ${laneId}:`, error);
+      console.warn(`[TrafficApiService] Detection request failed on lane ${laneId}:`, error);
       throw error;
     }
   }
@@ -81,13 +103,15 @@ class TrafficApiService {
    * Fetch model evaluation performance metrics (Precision, Recall, mAP) from backend
    */
   async fetchModelMetrics() {
+    if (!this.baseUrl) return null;
+
     try {
       const response = await fetch(`${this.baseUrl}${TRAFFIC_CONFIG.API.ENDPOINTS.METRICS}`, {
         method: 'GET',
       });
       if (!response.ok) return null;
       return await response.json();
-    } catch (error) {
+    } catch {
       return null;
     }
   }
