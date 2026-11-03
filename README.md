@@ -45,8 +45,7 @@ flowchart LR
 
 | Junction (normal) | Junction (emergency) |
 |---|---|
-| ![Normal](docs/images/junction-normal.png) | ![Emergency](<img width="1457" height="972" alt="emergency" src="https://github.com/user-attachments/assets/1a507ff4-08f9-431d-990c-65e438fb788f" />
-) |
+| ![Normal](docs/images/junction-normal.png) | ![Emergency](docs/images/junction-emergency.png) |
 
 | Cameras | Analysis |
 |---|---|
