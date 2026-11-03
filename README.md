@@ -253,13 +253,13 @@ A confident box alone can still be wrong, so the project adds a second check tha
 flowchart TD
     A["Video file"] --> B["Pick every<br/>3rd frame"]
     B --> C["Resize to<br/>640 × 640"]
-    C --> D["YOLOv11 vehicle detection<br/>box+class+confidence"]
+    C --> D["YOLOv11 (box + class<br/>+ confidence)"]
     D --> E{"Ambulance<br/>class?"}
     E -- No --> B
     E -- Yes --> F{"Confidence &ge; 0.20<br/>or siren lights?"}
     F -- No --> B
     F -- Yes --> G["Record hit:<br/>time+confidence"]
-    G --> H["Merge detection into<br/>time segments"]
+    G --> H["Merge<br/>time segments"]
     H --> I["Send segments<br/>to dashboard"]
 ```
 
